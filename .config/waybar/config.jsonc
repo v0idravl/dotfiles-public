@@ -1,0 +1,166 @@
+[
+    // Two bars, one file: waybar accepts an array of bar objects and spawns
+    // each. Why two: the laptop-only modules (backlight, battery,
+    // temperature) are meaningless on an external monitor,
+    // and waybar has no per-module output filter — so bar 0 pins the full
+    // set to the laptop panel (eDP-1) and bar 1 is a minimal
+    // workspaces/window/tray bar for anything else ("!eDP-1" is waybar's
+    // negated output match). Hotplug: waybar doesn't reliably re-enumerate
+    // outputs at runtime, so waybar-run restarts it on output events and a
+    // fresh bar lands on the new topology.
+    //
+    // Icon glyphs are bare nerd glyphs — no pango <span font_size> sizing.
+    // The bar font is Terminess Nerd Font Mono (see style.css), whose patch
+    // draws icons large enough that the per-icon span compensation the old
+    // Cascadia Mono NF needed (its icons render at 31-69% of the em box)
+    // is gone with that font.
+    {
+        "output": "eDP-1",
+        "layer": "bottom",
+        "position": "bottom",
+        "height": 26,
+        "spacing": 0,
+        "modules-left": [
+            "sway/workspaces",
+            "sway/mode",
+            "sway/window"
+        ],
+        "modules-center": [],
+        "modules-right": [
+            "cpu",
+            "memory",
+            "temperature",
+            "backlight",
+            "idle_inhibitor",
+            "custom/volume",
+            "network",
+            "battery",
+            "tray",
+            "custom/power"
+        ],
+        "sway/workspaces": {
+            "all-outputs": true,
+            "format": "{name}"
+        },
+        "sway/mode": {
+            "format": "{}",
+            "tooltip": false
+        },
+        "sway/window": {
+            "format": "{title}",
+            "max-length": 60,
+            "tooltip": false
+        },
+        "cpu": {
+            "interval": 5,
+            "format": " {usage}%",
+            "tooltip": false
+        },
+        "memory": {
+            "interval": 5,
+            "format": "󰍛 {used:0.1f}G",
+            "tooltip": false
+        },
+        "temperature": {
+            // machine-specific: find the right zone with
+            // cat /sys/class/thermal/thermal_zone*/type on your hardware
+            // (x86_pkg_temp is the usual pick on Intel laptops)
+            "thermal-zone": 7,
+            "critical-threshold": 85,
+            "format": " {temperatureC}°",
+            "tooltip": false
+        },
+        "backlight": {
+            // no "device": let waybar auto-detect so this stays portable
+            "format": " {percent}%",
+            "on-scroll-up": "brightnessctl set 5%+",
+            "on-scroll-down": "brightnessctl set 5%-",
+            "tooltip": false
+        },
+        "idle_inhibitor": {
+            "format": "{icon}",
+            "format-icons": {
+                "activated": "",
+                "deactivated": ""
+            },
+            "tooltip": false
+        },
+        // ALSA-only setup — and Debian's waybar build omits the upstream alsa
+        // module (the binary links libasound but has no "alsa" module
+        // string), so poll amixer.
+        // interval 1 keeps the display in step with the Fn keys; amixer is
+        // a cheap ioctl read. Blank output when no Master control exists
+        // (e.g. only the USB DAC attached) is expected.
+        "custom/volume": {
+            "format": "{}",
+            "exec": "amixer -q sget Master | awk -F'[][]' '/Playback [0-9]+ \\[/{printf \"%s %s\\n\", ($4==\"off\"?\"󰖁\":\"󰕾\"), $2; exit}'",
+            "interval": 1,
+            "on-click": "alacritty -e alsamixer",
+            "on-scroll-up": "amixer -q sset Master 5%+",
+            "on-scroll-down": "amixer -q sset Master 5%-",
+            "tooltip": false
+        },
+        "network": {
+            "format-wifi": " {essid}",
+            "format-ethernet": " {ifname}",
+            "format-disconnected": " offline",
+            "on-click": "alacritty -e nmtui",
+            "tooltip": false
+        },
+        "battery": {
+            "states": {
+                "warning": 30,
+                "critical": 15
+            },
+            "format": "{icon} {capacity}%",
+            "format-charging": " {capacity}%",
+            "format-plugged": " {capacity}%",
+            "format-icons": [
+                "",
+                "",
+                "",
+                "",
+                ""
+            ]
+        },
+        "tray": {
+            "icon-size": 16,
+            "spacing": 8
+        },
+        "custom/power": {
+            "format": "",
+            "tooltip": false,
+            "on-click": "swaynag -t warning -m 'Power' -b 'Lock' 'swaylock -f' -b 'Logout' 'swaymsg exit' -b 'Reboot' 'systemctl reboot' -b 'Poweroff' 'systemctl poweroff'"
+        }
+    },
+    {
+        // minimal external-monitor bar: no laptop-only modules (backlight,
+        // battery, temperature) — see the header comment above
+        "output": "!eDP-1",
+        "layer": "bottom",
+        "position": "bottom",
+        "height": 26,
+        "spacing": 0,
+        "modules-left": [
+            "sway/workspaces",
+            "sway/window"
+        ],
+        "modules-center": [],
+        "modules-right": [
+            "tray"
+        ],
+        "sway/workspaces": {
+            "all-outputs": true,
+            "format": "{name}"
+        },
+        "sway/window": {
+            "format": "{title}",
+            "max-length": 60,
+            "tooltip": false
+        },
+        "tray": {
+            "icon-size": 16,
+            "spacing": 8
+        }
+    }
+]

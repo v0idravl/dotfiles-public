@@ -1,0 +1,70 @@
+#!/usr/bin/env bash
+# waybar-run — sway's waybar supervisor: exactly one waybar, always.
+#
+# Two failure modes this exists for, both observed on this host:
+#   - Stacked bars (3-8 of them on a new monitor): every bare `waybar`
+#     launch adds another process, and waybar happily draws one bar per
+#     output PER PROCESS. Nothing in waybar or sway dedupes launches.
+#   - The missing bar: waybar was started by sway's `exec`, died at some
+#     point (its stderr vanishes with sway's), and nothing ever restarted it.
+#
+# How it works:
+#   - flock on a lockfile in $XDG_RUNTIME_DIR makes the SUPERVISOR itself
+#     single-instance: a second waybar-run exits silently instead of stacking
+#     a second restart loop. Safe for sway reloads and manual re-runs.
+#   - pkill before the first start clears any bare `waybar` stragglers
+#     (e.g. one started from a terminal for debugging).
+#   - The loop restarts waybar after ANY exit, with a 1s backoff so a
+#     crash-on-start bug can't spin. stderr/stdout land in
+#     ~/.local/state/waybar.log — the next crash leaves evidence instead of
+#     a silently absent bar.
+#
+#   - Output hotplug: waybar does not reliably re-enumerate outputs at
+#     runtime (a monitor plugged in after launch gets no bar, or a stale
+#     layout with the dual-bar config.jsonc). A background watcher
+#     subscribes to sway's output events and `pkill -x waybar`s on any
+#     hotplug; the restart loop then brings a fresh bar up on the new
+#     topology within ~1s. The watcher is killed on supervisor exit and can
+#     be disabled with WAYBAR_RUN_NO_WATCH=1 (same env-guard pattern as
+#     theme-set's THEME_SET_NO_RELOAD — set it for hermetic runs that must
+#     never touch a real session). Guarded on `command -v swaymsg` so
+#     running outside a sway session can't kill the supervisor.
+#
+# Interactions that still work unchanged:
+#   - theme-set's `pkill -USR2 waybar` (live CSS reload) — signals the bar,
+#     not the supervisor.
+#   - Manual restarts: `pkill -x waybar` and the loop brings a fresh one back
+#     in ~1s. To stop waybar for real: `pkill -f waybar-run` first.
+#
+# Used by .config/sway/config (`exec waybar-run`).
+set -euo pipefail
+
+LOCK="${XDG_RUNTIME_DIR:-/run/user/$(id -u)}/waybar-run.lock"
+LOG="$HOME/.local/state/waybar.log"
+
+exec 9>"$LOCK"
+flock -n 9 || exit 0   # another supervisor already owns waybar
+
+mkdir -p "$(dirname "$LOG")"
+pkill -x waybar 2>/dev/null || true
+sleep 0.3              # let the old bar's layer-surfaces actually die
+
+# Output-hotplug watcher: any output event kills waybar, and the restart
+# loop below brings a fresh bar up on the new topology. Runs in a subshell
+# so a swaymsg failure (not in a sway session) exits only the watcher, not
+# the supervisor; the trap kills the subshell AND its children (swaymsg)
+# when the supervisor exits.
+watch_pid=""
+if [[ -z "${WAYBAR_RUN_NO_WATCH:-}" ]] && command -v swaymsg >/dev/null 2>&1; then
+  (
+    swaymsg -m -t subscribe '["output"]' 2>/dev/null |
+      while read -r _; do pkill -x waybar 2>/dev/null || true; done
+  ) &
+  watch_pid=$!
+fi
+trap '[[ -z "$watch_pid" ]] || { pkill -P "$watch_pid" 2>/dev/null || true; kill "$watch_pid" 2>/dev/null || true; }' EXIT
+
+while :; do
+  waybar >>"$LOG" 2>&1 || true
+  sleep 1
+done

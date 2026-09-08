@@ -1,0 +1,378 @@
+#!/usr/bin/env bash
+# theme-set — switch the whole desktop between two themes, live:
+#
+#   dragon    kanagawa-dragon on near-black #0d0d0d (the default look)
+#   redlight  low-light red-on-black (+ one amber accent) for night work —
+#             wallpaper drops to solid black
+#
+# Usage:
+#   theme-set                 print the current mode
+#   theme-set dragon          apply dragon
+#   theme-set redlight        apply redlight
+#   theme-set toggle          flip between the two
+#   theme-set --auto          pick by the clock: redlight inside a fixed
+#                             window (default 19:00–06:00; override with
+#                             THEME_RED_START/THEME_RED_END as 24h ints).
+#                             This is what a timer/cron calls
+#   theme-set --force MODE    re-apply even if MODE is already current
+#                             (regenerates every fragment)
+#
+# How it works
+# ------------
+# State is one word in $XDG_STATE_HOME/theme/mode. Applying a mode REWRITES
+# generated files only — no tracked config is ever touched, so the git
+# tree stays clean. Two integration patterns:
+#
+#   include pattern (live reload): sway, waybar, alacritty, tmux and
+#     zsh source a generated theme fragment next to their tracked config;
+#     theme-set rewrites the fragment and pokes the app's reload mechanism.
+#   generate pattern (no include support): mako, fuzzel, swaylock
+#     store non-color settings in a tracked <app>/base.conf; theme-set
+#     concatenates base + generated colors into the app's real config path.
+#
+# Reload matrix: sway (swaymsg reload), waybar (SIGUSR2), alacritty (watches
+# imports), mako (makoctl reload), tmux (source-file), nvim (colorscheme sent
+# to every running instance's socket) all switch
+# LIVE. redlight additionally drops the backlight to THEME_RED_BRIGHTNESS
+# (default 5%, saved and restored on dragon) — hardware-level dimming that
+# also covers apps which don't follow the theme. fuzzel, swaylock and the zsh
+# prompt pick it up on next launch/lock/shell.
+#
+# Every reload is guarded (command -v / socket / session checks), so this is
+# safe to run headless, over SSH, and from cron. Set THEME_SET_NO_RELOAD=1
+# to skip the whole reload section (hermetic tests, packaging).
+#
+# To tune colors: edit the palette blocks below — nothing else hardcodes them.
+# To reverse entirely: theme-set dragon, then delete the generated fragments.
+set -euo pipefail
+
+CFG="${XDG_CONFIG_HOME:-$HOME/.config}"
+STATE_DIR="${XDG_STATE_HOME:-$HOME/.local/state}/theme"
+MODE_FILE="$STATE_DIR/mode"
+
+# ── Args ─────────────────────────────────────────────────────────
+force=false
+mode_arg=""
+while [[ $# -gt 0 ]]; do
+  case "$1" in
+    --force) force=true ;;
+    --auto)  mode_arg="auto" ;;
+    dragon|redlight|toggle)
+      [[ -z "$mode_arg" ]] || { echo "theme-set: conflicting modes" >&2; exit 2; }
+      mode_arg="$1" ;;
+    -h|--help) sed -n '2,30p' "$0"; exit 0 ;;
+    *) echo "theme-set: unknown argument '$1' (try --help)" >&2; exit 2 ;;
+  esac
+  shift
+done
+
+current_mode() { cat "$MODE_FILE" 2>/dev/null || echo dragon; }
+
+# no args: report current mode
+if [[ -z "$mode_arg" ]] && ! $force; then
+  current_mode
+  exit 0
+fi
+
+# ── Resolve target mode ──────────────────────────────────────────
+case "$mode_arg" in
+  toggle)
+    [[ "$(current_mode)" == dragon ]] && target=redlight || target=dragon ;;
+  auto)
+    # Fixed hour window: THEME_RED_START/THEME_RED_END (24h ints), defaulting
+    # to 19:00 -> 06:00. Overnight windows (start > end) work.
+    start=${THEME_RED_START:-19}
+    end=${THEME_RED_END:-6}
+    hour=$(date +%H); hour=${hour#0}; hour=${hour:-0}
+    if (( start > end )); then        # overnight window, e.g. 19 -> 6
+      (( hour >= start || hour < end )) && target=redlight || target=dragon
+    else
+      (( hour >= start && hour < end )) && target=redlight || target=dragon
+    fi ;;
+  dragon|redlight) target="$mode_arg" ;;
+  *) target="$(current_mode)" ;;     # bare --force: re-apply current
+esac
+
+# ── Idempotency: a timer firing into the current mode is a no-op ──
+if [[ "$target" == "$(current_mode)" ]] && ! $force; then
+  echo "theme already $target"
+  exit 0
+fi
+
+# ── Palettes ─────────────────────────────────────────────────────
+# One shell variable per semantic slot; the writers below reference slots
+# only.
+# nerd-font glyphs used in the tmux status bar
+GLYPH_TERM=$'\uf120'   # status-left
+GLYPH_NET=$'\uf0ac'    # status-right: LAN IP
+GLYPH_CAL=$'\uf073'    # status-right: date
+GLYPH_CLOCK=$'\uf017'  # status-right: time
+
+if [[ "$target" == dragon ]]; then
+  BG0=#0d0d0d;  BG1=#181616;  BG2=#282727;  BG3=#393836
+  FG0=#c5c9c5;  FG1=#a6a69c;  FG_SEL=#c8c093
+  DIM=#727169;  BORDER=#54546d;  SEL_BG=#2d4f67
+  ACCENT=#e6c384;  YELLOW=#c4b28a
+  RED=#c4746e;   RED_BR=#e46876
+  GREEN=#8a9a7b; GREEN_BR=#98bb6c
+  BLUE=#7fb4ca
+  PURPLE=#938aa9; VIOLET=#8992a7; AQUA=#8ea4a2
+  STALE=#b6927b; SWAY_FOCUS=#957fb8; CURSOR=#c8c093
+  SW_KEYHL=#7fb4ca; SW_BSHL=#c4746e
+  WS_FOCUS=#e6c384; PANE_BORDER=#8a9a7b
+  # alacritty 16-color tables
+  N_BLACK=#282727; N_RED=#c4746e; N_GREEN=#8a9a7b; N_YELLOW=#c4b28a
+  N_BLUE=#8ba4b0; N_MAGENTA=#a292a3; N_CYAN=#8ea4a2; N_WHITE=#c8c093
+  B_BLACK=#625e5a; B_RED=#e46876; B_GREEN=#87a987; B_YELLOW=#e6c384
+  B_BLUE=#7fb4ca; B_MAGENTA=#938aa9; B_CYAN=#7aa89f; B_WHITE=#c5c9c5
+  # zsh prompt
+  Z_FRAME=#8a9a7b; Z_PAREN=#7aa89f; Z_GLYPH=#957fb8; Z_PATH=#7fb4ca; Z_ARROW=#c34043
+else
+  # redlight: monochrome red ramp on pure black; ACCENT amber is the single
+  # hue break (focus/warning states), urgent is the brightest red
+  BG0=#000000;  BG1=#0a0505;  BG2=#1a0a0a;  BG3=#2a1010
+  FG0=#d43a3a;  FG1=#8a2828;  FG_SEL=#ff6a5a
+  # DIM #8a2828 (not the #4a1a1a border shade): waybar workspace numbers and
+  # other "inactive" text must stay readable on pure black.
+  DIM=#8a2828;  BORDER=#4a1a1a;  SEL_BG=#330f0f
+  ACCENT=#d4763a;  YELLOW=#d4763a
+  RED=#ff2020;   RED_BR=#ff4a4a
+  GREEN=#b34538; GREEN_BR=#e06a3a
+  BLUE=#8a2828
+  PURPLE=#6a2020; VIOLET=#6a2020; AQUA=#b3573a
+  # SWAY_FOCUS/PANE_BORDER: dim red, not amber — a bright focus ring around
+  # the window/pane glows in a dark room. WS_FOCUS (waybar focused workspace)
+  # is bold bright red instead: clear "you are here" without the orange glow.
+  STALE=#e06a3a; SWAY_FOCUS=#8a2828; CURSOR=#ff4a4a
+  SW_KEYHL=#d4763a; SW_BSHL=#ff4a4a
+  WS_FOCUS=#ff4a4a; PANE_BORDER=#8a2828
+  N_BLACK=#241010; N_RED=#d43a3a; N_GREEN=#a8502e; N_YELLOW=#d4763a
+  N_BLUE=#8a2828; N_MAGENTA=#a83a56; N_CYAN=#b3573a; N_WHITE=#e05050
+  B_BLACK=#4a1a1a; B_RED=#ff4a4a; B_GREEN=#e06a3a; B_YELLOW=#ff9e50
+  B_BLUE=#c04040; B_MAGENTA=#e05070; B_CYAN=#ff7a50; B_WHITE=#ff8080
+  Z_FRAME=#8a2828; Z_PAREN=#6a2020; Z_GLYPH=#ff4a4a; Z_PATH=#d4763a; Z_ARROW=#ff2020
+fi
+
+GEN="GENERATED by theme-set (mode: $target) — edit theme-set instead"
+
+# emit <path> — write stdin atomically (temp file + mv), creating parents
+emit() {
+  local path="$1" tmp
+  mkdir -p "$(dirname "$path")"
+  tmp="$(mktemp "${path}.XXXXXX")"
+  cat > "$tmp"
+  mv "$tmp" "$path"
+}
+
+# gen_from_base <base-rel> <out-rel> — tracked base.conf + stdin colors
+gen_from_base() {
+  local base="$CFG/$1" out="$CFG/$2" tmp
+  if [[ ! -f "$base" ]]; then
+    echo "theme-set: skip $2 (missing $base — install the base config first)" >&2
+    return 0
+  fi
+  mkdir -p "$(dirname "$out")"
+  tmp="$(mktemp "${out}.XXXXXX")"
+  { echo "# $GEN"; echo; cat "$base"; echo; cat; } > "$tmp"
+  mv "$tmp" "$out"
+}
+
+# ── sway: wallpaper line + focused-border colors ─────────────────
+# redlight drops the wallpaper to solid black; dragon restores the PNG that
+# set-wallpaper maintains (swaymsg reload re-reads this include either way).
+if [[ "$target" == dragon ]]; then
+  emit "$CFG/sway/theme.conf" <<EOF
+# $GEN
+output * bg ~/Pictures/wallpaper.png center #000000
+# args: border background text indicator child_border
+client.focused $SWAY_FOCUS $SWAY_FOCUS $BG0 $SWAY_FOCUS $SWAY_FOCUS
+EOF
+else
+  emit "$CFG/sway/theme.conf" <<EOF
+# $GEN
+output * bg #000000 solid_color
+# args: border background text indicator child_border
+client.focused $SWAY_FOCUS $SWAY_FOCUS $BG0 $SWAY_FOCUS $SWAY_FOCUS
+EOF
+fi
+
+# ── waybar: @define-color slots consumed by style.css ────────────
+emit "$CFG/waybar/theme.css" <<EOF
+/* $GEN */
+@define-color bg $BG0;
+@define-color fg $FG0;
+@define-color dim $DIM;
+@define-color accent $ACCENT;
+@define-color wsfocus $WS_FOCUS;
+@define-color urgent $RED;
+@define-color modefg $BG1;
+@define-color info $BLUE;
+@define-color ok $GREEN_BR;
+@define-color okdim $GREEN;
+@define-color stale $STALE;
+@define-color power $RED;
+EOF
+
+# ── alacritty: full color tables (watched import, reloads live) ──
+emit "$CFG/alacritty/theme.toml" <<EOF
+# $GEN
+[colors.primary]
+background = "$BG0"
+foreground = "$FG0"
+
+[colors.cursor]
+text   = "$BG0"
+cursor = "$CURSOR"
+
+[colors.selection]
+background = "$SEL_BG"
+foreground = "$FG_SEL"
+
+[colors.normal]
+black   = "$N_BLACK"
+red     = "$N_RED"
+green   = "$N_GREEN"
+yellow  = "$N_YELLOW"
+blue    = "$N_BLUE"
+magenta = "$N_MAGENTA"
+cyan    = "$N_CYAN"
+white   = "$N_WHITE"
+
+[colors.bright]
+black   = "$B_BLACK"
+red     = "$B_RED"
+green   = "$B_GREEN"
+yellow  = "$B_YELLOW"
+blue    = "$B_BLUE"
+magenta = "$B_MAGENTA"
+cyan    = "$B_CYAN"
+white   = "$B_WHITE"
+EOF
+
+# ── tmux: status bar + active pane border ────────────────────────
+emit "$CFG/tmux/theme.conf" <<EOF
+# $GEN
+set -g status-style "bg=$BG0,fg=$FG0"
+set -g status-left " #[fg=$GREEN_BR,bold]$GLYPH_TERM#[fg=$BORDER,nobold] │ "
+set -g status-right "#[fg=$BORDER]│ #[fg=$BLUE]$GLYPH_NET #(hostname -I | awk '{print \$1}') #[fg=$BORDER]│ #[fg=$PURPLE]$GLYPH_CAL %d %b #[fg=$FG0]$GLYPH_CLOCK %H:%M "
+set -g window-status-current-format "#[fg=$ACCENT,bold] #I:#W "
+set -g pane-active-border-style "fg=$PANE_BORDER"
+EOF
+
+# ── zsh: prompt color slots consumed by .zshrc ───────────────────
+emit "$CFG/zsh/theme.zsh" <<EOF
+# $GEN
+THEME_FRAME='$Z_FRAME'
+THEME_PAREN='$Z_PAREN'
+THEME_GLYPH='$Z_GLYPH'
+THEME_PATH='$Z_PATH'
+THEME_ARROW='$Z_ARROW'
+EOF
+
+# ── mako / fuzzel / swaylock: base + colors ──
+gen_from_base mako/base.conf mako/config <<EOF
+background-color=$BG0
+text-color=$FG0
+border-color=$BORDER
+
+# urgent notifications get the brightest border so they stand out
+[urgency=high]
+border-color=$RED
+default-timeout=0
+EOF
+
+gen_from_base fuzzel/base.ini fuzzel/fuzzel.ini <<EOF
+# fuzzel colors are RRGGBBAA
+[colors]
+background=${BG0#\#}ff
+text=${FG0#\#}ff
+match=${ACCENT#\#}ff
+selection=${SEL_BG#\#}ff
+selection-text=${FG_SEL#\#}ff
+selection-match=${B_YELLOW#\#}ff
+border=${BORDER#\#}ff
+EOF
+
+gen_from_base swaylock/base.conf swaylock/config <<EOF
+color=${BG0#\#}
+line-color=${BG0#\#}
+inside-color=${BG1#\#}
+ring-color=${BORDER#\#}
+text-color=${FG0#\#}
+separator-color=${BORDER#\#}
+# keypress feedback: accent flash on input, bright red on backspace
+key-hl-color=${SW_KEYHL#\#}
+bs-hl-color=${SW_BSHL#\#}
+# state colors: amber while verifying, red on wrong, green/bright when cleared
+ring-ver-color=${ACCENT#\#}
+text-ver-color=${ACCENT#\#}
+ring-wrong-color=${RED#\#}
+text-wrong-color=${RED#\#}
+ring-clear-color=${GREEN_BR#\#}
+text-clear-color=${GREEN_BR#\#}
+EOF
+
+# ── Live reloads (all guarded; safe headless/SSH/cron) ──────────
+# THEME_SET_NO_RELOAD=1 skips this whole section — set it for hermetic runs
+# (redirected XDG dirs, packaging, tests) so they can't reach a REAL session's
+# sway / tmux / waybar through their still-live sockets and processes.
+if [[ -z "${THEME_SET_NO_RELOAD:-}" ]]; then
+# display hardware: aggressive low light for redlight. Backlight drops to a
+# floor (THEME_RED_BRIGHTNESS, default 5%; the pre-switch level is saved and
+# restored on dragon). Guarded: a no-op on a desktop with no backlight.
+mkdir -p "$STATE_DIR"
+if command -v brightnessctl >/dev/null 2>&1 && brightnessctl info >/dev/null 2>&1; then
+  if [[ "$target" == redlight ]]; then
+    brightnessctl get > "$STATE_DIR/brightness" 2>/dev/null || true
+    brightnessctl set "${THEME_RED_BRIGHTNESS:-5%}" >/dev/null 2>&1 || true
+  elif [[ -f "$STATE_DIR/brightness" ]]; then
+    brightnessctl set "$(cat "$STATE_DIR/brightness")" >/dev/null 2>&1 || true
+    rm -f "$STATE_DIR/brightness"
+  fi
+fi
+
+# sway (discovers the socket the same way set-wallpaper does)
+if [[ -z "${SWAYSOCK:-}" ]] && command -v sway >/dev/null 2>&1 && pgrep -x sway >/dev/null 2>&1; then
+  SWAYSOCK="/run/user/$(id -u)/sway-ipc.$(id -u).$(pgrep -x sway | head -1).sock"
+fi
+if [[ -n "${SWAYSOCK:-}" && -S "${SWAYSOCK:-}" ]] && command -v swaymsg >/dev/null 2>&1; then
+  swaymsg reload >/dev/null 2>&1 || true
+fi
+
+# alacritty watches imported files; touch the main toml too (content-neutral)
+[[ -f "$CFG/alacritty/alacritty.toml" ]] && touch "$CFG/alacritty/alacritty.toml" || true
+
+# waybar reloads its CSS on SIGUSR2
+command -v waybar >/dev/null 2>&1 && pkill -USR2 waybar 2>/dev/null || true
+
+# mako
+command -v makoctl >/dev/null 2>&1 && makoctl reload >/dev/null 2>&1 || true
+
+# tmux: re-source the theme fragment in the running server
+if command -v tmux >/dev/null 2>&1 && tmux has-session 2>/dev/null; then
+  tmux source-file "$CFG/tmux/theme.conf" >/dev/null 2>&1 || true
+fi
+
+# nvim: switch every running instance over its socket; new instances read
+# the mode file from init.lua
+if command -v nvim >/dev/null 2>&1; then
+  scheme=kanagawa-dragon
+  [[ "$target" == redlight ]] && scheme=redlight
+  for sock in "${XDG_RUNTIME_DIR:-/run/user/$(id -u)}"/nvim.*; do
+    [[ -S "$sock" ]] || continue
+    nvim --server "$sock" --remote-send \
+      "<C-\\><C-n>:colorscheme $scheme<CR>" >/dev/null 2>&1 || true
+  done
+fi
+
+# confirmation notification doubles as a visual mako-reload check
+if command -v notify-send >/dev/null 2>&1 && [[ -n "${DBUS_SESSION_BUS_ADDRESS:-}" ]]; then
+  notify-send "theme-set" "mode: $target" >/dev/null 2>&1 || true
+fi
+fi  # THEME_SET_NO_RELOAD
+
+# ── Record state ─────────────────────────────────────────────────
+mkdir -p "$STATE_DIR"
+printf '%s\n' "$target" > "$MODE_FILE"
+
+echo "theme: $target"

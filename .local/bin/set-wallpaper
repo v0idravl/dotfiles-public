@@ -1,0 +1,29 @@
+#!/bin/sh
+# set-wallpaper — install an image as ~/Pictures/wallpaper.png and reload
+# sway. The presentation is sway's own: theme-set's dragon fragment sets
+# `output * bg ~/Pictures/wallpaper.png center #000000`, so the image shows
+# centered at NATIVE size on solid black. Trade-off of letting sway do the
+# compositing: oversized images crop at screen edges instead of shrinking.
+#
+# Usage:  set-wallpaper SOURCE_IMAGE
+set -eu
+
+src=${1:-}
+out="$HOME/Pictures/wallpaper.png"
+
+if [ -z "$src" ] || [ ! -f "$src" ]; then
+	echo "usage: set-wallpaper SOURCE_IMAGE" >&2
+	exit 1
+fi
+
+mkdir -p "$HOME/Pictures"
+cp -- "$src" "$out"
+
+# Reload sway if it's running so the change is live immediately.
+if command -v sway >/dev/null && pgrep -x sway >/dev/null; then
+	SWAYSOCK="/run/user/$(id -u)/sway-ipc.$(id -u).$(pgrep -x sway | head -1).sock"
+	export SWAYSOCK
+	swaymsg reload >/dev/null 2>&1 || true
+fi
+
+echo "wallpaper set from $src -> $out"
